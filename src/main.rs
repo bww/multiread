@@ -1,11 +1,7 @@
 use std::thread;
 use std::io;
-use std::io::prelude::*;
 use std::io::{Error, ErrorKind};
-use std::net::Shutdown;
 use std::sync::Arc;
-// use std::sync::mpsc;
-// use std::sync::mpsc::{Sender, SyncSender, Receiver};
 
 use tokio::io::Interest;
 use tokio::net::{UnixStream, UnixListener};
@@ -54,17 +50,21 @@ async fn handle_forward(mut rx: Receiver<Message>, clients: Arc<DashMap<String, 
 }
 
 async fn read_stream(stream: &UnixStream) -> Result<String, Error> {
-  println!(">>> WILL Read");
+  let mut value: String = String::new();
   loop {
-    let ready = stream.ready(Interest::READABLE | Interest::WRITABLE).await?;
-
+    let ready = stream.ready(Interest::READABLE).await?;
+    
     if ready.is_readable() {
       let mut data = vec![0; 1024];
-      // Try to read data, this may still fail with `WouldBlock`
-      // if the readiness event is a false positive.
       match stream.try_read(&mut data) {
         Ok(n) => {
-          println!("read {} bytes", n);        
+          let v = String::from_utf8(data[..n].to_vec()).unwrap();
+          value.push_str(&v);
+          if let Some(x) = value.find("\n") {
+            return Ok(value[..x].to_string());
+          }else if n < 1 {
+            return Ok(value);
+          }
         }
         Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
           continue;
@@ -76,21 +76,9 @@ async fn read_stream(stream: &UnixStream) -> Result<String, Error> {
     }
     
   }
-  
-  // let mut data = String::new();
-  // match stream.read_to_string(&mut data) {
-  //   Ok(_) => {
-  //     println!(">>> Read: {}", data);
-  //     return Ok(data);
-  //   }
-  //   Err(err) => {
-  //     return Err(err);
-  //   }
-  // }
 }
 
 async fn recv_message(mut rx: Receiver<String>) -> Result<String, Error> {
-  println!(">>> WILL Recv");
   match rx.recv().await {
     Some(data) => {
       println!(">>> Recv: {}", data);
@@ -124,10 +112,10 @@ async fn read_or_recv(stream: &UnixStream, rx: Receiver<String>) -> Result<Strin
 async fn send_tx(tx: Sender<Message>, msg: Message) {
   match tx.send(msg).await {
     Ok(_) => {
-      // nothing
+      println!(">>> Did send");
     },
     Err(err) => {
-      println!("*** {}", err);
+      println!("*** Could not send: {}", err);
     }
   }
 }
@@ -138,7 +126,7 @@ fn handle_client(id: String, stream: UnixStream, clients: Arc<DashMap<String, Se
   match block_on(read_or_recv(&stream, rx)) {
     Ok(data) => {
       let id = id.clone();
-      send_tx(tx, Message{sender: id, data: data});
+      block_on(send_tx(tx, Message{sender: id, data: data}));
     }
     Err(err) => {
       println!("*** Could not read: {:?}", err);
