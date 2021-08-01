@@ -1,21 +1,16 @@
 use std::thread;
-use std::io;
-use std::io::{Error, ErrorKind};
 use std::sync::Arc;
 
-use tokio::io::Interest;
-use tokio::net::{UnixStream, UnixListener};
+use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Sender, Receiver};
 
 use futures::executor::block_on;
-use futures::{future::FutureExt, pin_mut, select, join};
+
 use dashmap::DashMap;
 
-struct Message {
-  sender: String,
-  data:   String,
-}
+use multiread::client::Client;
+use multiread::message::Message;
 
 fn handle_server(rx: Receiver<Message>, clients: Arc<DashMap<String, Sender<String>>>) {
   block_on(handle_forward(rx, clients));
@@ -50,112 +45,6 @@ async fn handle_forward(mut rx: Receiver<Message>, clients: Arc<DashMap<String, 
   }
 }
 
-async fn read_stream(stream: &UnixStream) -> Result<String, Error> {
-  let mut value: String = String::new();
-  loop {
-    let ready = stream.ready(Interest::READABLE).await?;
-    if ready.is_readable() {
-      let mut data = vec![0; 1024];
-      match stream.try_read(&mut data) {
-        Ok(n) => {
-          let v = String::from_utf8(data[..n].to_vec()).unwrap();
-          value.push_str(&v);
-          if let Some(x) = value.find("\n") {
-            return Ok(value[..x+1].to_string());
-          }else if n < 1 {
-            return Ok(value);
-          }
-        }
-        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-          continue;
-        }
-        Err(e) => {
-          return Err(e.into());
-        }
-      }
-    }
-  }
-}
-
-async fn write_stream(stream: UnixStream, data: String) -> Result<(), Error> {
-  let mut value: &[u8] = data.as_bytes();
-  loop {
-    let ready = stream.ready(Interest::WRITABLE).await?;
-    if ready.is_writable() {
-      match stream.try_write(value) {
-        Ok(n) => {
-          if n == value.len() {
-            return Ok(());
-          }else{
-            value = &value[n..];
-          }
-        }
-        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-          continue;
-        }
-        Err(e) => {
-          return Err(e.into());
-        }
-      }
-    }    
-  }
-}
-
-
-async fn recv_message(mut rx: Receiver<String>) -> Result<String, Error> {
-  match rx.recv().await {
-    Some(data) => {
-      return Ok(data);
-    }
-    _ => {
-      return Err(Error::new(ErrorKind::UnexpectedEof, "Nothing to receive"));
-    }
-  }
-}
-
-async fn read_or_recv(stream: &UnixStream, rx: Receiver<String>) -> Result<String, Error> {
-  let read = read_stream(stream).fuse();
-  let recv = recv_message(rx).fuse();
-  pin_mut!(read, recv);
-  select! {
-    recv_res = recv => {
-      return recv_res;
-    },
-    read_res = read => {
-      return read_res;
-    },
-  }
-}
-
-async fn send_tx(tx: Sender<Message>, msg: Message) {
-  match tx.send(msg).await {
-    Ok(_) => {},
-    Err(err) => {
-      println!("*** Could not send: {}", err);
-    }
-  }
-}
-
-fn handle_client(id: String, stream: UnixStream, clients: Arc<DashMap<String, Sender<String>>>, tx: Sender<Message>, rx: Receiver<String>) {
-  match block_on(read_or_recv(&stream, rx)) {
-    Ok(data) => {
-      let id = id.clone();
-      let f1 = send_tx(tx, Message{sender: id, data: data.clone()});
-      let f2 = write_stream(stream, data.clone());
-      block_on(async {
-        return join!(f1, f2);
-      });
-    }
-    Err(err) => {
-      println!("*** Could not read: {:?}", err);
-    }
-  }
-  
-  let id = id.clone();
-  clients.remove(&id).expect("Could not deregister client");
-  println!("Client ended: {}", id);
-}
-
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
   let listener = UnixListener::bind("__multiread").unwrap();
@@ -176,7 +65,8 @@ async fn main() -> std::io::Result<()> {
         let (vtx, vrx) = mpsc::channel(2);
         let clients = Arc::clone(&clients);
         clients.insert(format!("{}", i), vtx);
-        thread::spawn(move || handle_client(format!("{}", i), stream, clients, dup, vrx));
+        let client = Client::new(format!("{}", i), stream, clients);
+        thread::spawn(move || client.handle(dup, vrx));
         i = i + 1;
       }
       Err(err) => {
