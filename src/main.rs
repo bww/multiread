@@ -9,6 +9,7 @@ use tokio::sync::mpsc::Sender;
 use dashmap::DashMap;
 
 use multiread::server::Server;
+use multiread::drone::Drone;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -26,12 +27,13 @@ async fn main() -> std::io::Result<()> {
   fs::create_dir_all(dup).expect("Could not create socket path");
   
   dir.push(key);
-  println!(">>> Bind: {}", dir.display());
-  
-  let listener = match UnixListener::bind("__multiread") {
+  let dup = dir.clone();
+  let listener = match UnixListener::bind(dup) {
     Ok(listener) => listener,
     Err(ref err) if err.kind() == io::ErrorKind::AddrInUse => {
-      println!(">>> CLIENT PATH");
+      println!(">>> Client: {}", dir.display());
+      let dup = dir.clone();
+      Drone::connect(dup.as_path())?.handle();
       return Ok(());
     }
     Err(err) => {
@@ -43,6 +45,7 @@ async fn main() -> std::io::Result<()> {
   let streams: DashMap<String, Sender<String>> = DashMap::new();
   let clients = Arc::new(streams);
   
+  println!(">>> Server: {}", dir.display());
   let server = Server::new(clients);
   server.run(listener);
   

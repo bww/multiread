@@ -1,7 +1,8 @@
 use std::io;
-use std::io::{Error};
+use std::io::Error;
+use std::marker::Unpin;
 
-use tokio::io::Interest;
+use tokio::io::{Interest, AsyncRead, AsyncReadExt};
 use tokio::net::{UnixStream};
 use tokio::sync::mpsc::{Sender, Receiver};
 
@@ -31,6 +32,30 @@ pub async fn read_stream(stream: &UnixStream) -> Result<String, Error> {
         Err(e) => {
           return Err(e.into());
         }
+      }
+    }
+  }
+}
+
+pub async fn read_async(src: &mut(impl AsyncRead + Unpin)) -> Result<String, Error> {
+  let mut value: String = String::new();
+  loop {
+    let mut data = vec![0; 1024];
+    match src.read(&mut data).await {
+      Ok(n) => {
+        let v = String::from_utf8(data[..n].to_vec()).unwrap();
+        value.push_str(&v);
+        if let Some(x) = value.find("\n") {
+          return Ok(value[..x+1].to_string());
+        }else if n < 1 {
+          return Ok(value);
+        }
+      }
+      Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+        continue;
+      }
+      Err(e) => {
+        return Err(e.into());
       }
     }
   }
@@ -90,6 +115,20 @@ pub async fn read_recv(stream: &UnixStream, rx: Receiver<String>) -> Result<Stri
     },
     read_res = read => {
       return read_res;
+    },
+  }
+}
+
+pub async fn read_either(a: &mut(impl AsyncRead + Unpin), b: &mut(impl AsyncRead + Unpin)) -> Result<String, Error> {
+  let fa = read_async(a).fuse();
+  let fb = read_async(b).fuse();
+  pin_mut!(fa, fb);
+  select! {
+    res_a = fa => {
+      return res_a;
+    },
+    res_b = fb => {
+      return res_b;
     },
   }
 }
